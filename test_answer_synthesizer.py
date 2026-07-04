@@ -1,5 +1,5 @@
 from answer_synthesizer import build_answer, detect_potential_conflicts
-from app import DEMO_PRESETS, demo_preset_results
+from app import DEMO_PRESETS, build_manual_submission, demo_preset_results, demo_preset_status
 
 
 REQUIRED_KEYS = {
@@ -23,9 +23,14 @@ def require(condition, message):
 
 
 def test_demo_answers():
+    require(len(DEMO_PRESETS) == 4, "expected exactly four TZ demo presets")
+
     for preset in DEMO_PRESETS:
         title = preset["label"]
         facts = demo_preset_results(title)
+        status, detail = demo_preset_status(title, facts)
+        require(status in {"найдено", "частично найдено", "пробел"}, f"{title}: invalid preset status")
+        require(detail, f"{title}: preset status detail is empty")
         answer = build_answer(title, facts)
 
         missing_keys = REQUIRED_KEYS - set(answer)
@@ -86,9 +91,31 @@ def test_conflicts_tolerate_partial_facts():
     require(empty_answer["markdown"], "empty answer should still export markdown")
 
 
+def test_manual_submission_shape():
+    row = build_manual_submission(
+        expert_name="Гипроникель",
+        material="шахтные воды",
+        process="обратный осмос",
+        result_property="извлечение воды",
+        result_value="95",
+        result_unit="%",
+        condition_parameter="сульфаты",
+        condition_value="200-300",
+        condition_unit="мг/л",
+        location_geo="Россия",
+        source_quote="ручная проверка эксперта",
+        comment="демо-заявка",
+    )
+    require(row["status"] == "needs_review", "manual submission should go to review")
+    require(row["facts_count"] == 1, "manual submission should contain one fact")
+    require(row["records"][0]["record_type"] == "fact", "manual record should be a fact")
+    require(row["records"][0]["context"]["lab_or_author"] == "Гипроникель", "expert should be preserved")
+
+
 def main():
     test_demo_answers()
     test_conflicts_tolerate_partial_facts()
+    test_manual_submission_shape()
     print("OK: answer synthesizer tests passed")
 
 

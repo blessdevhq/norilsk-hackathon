@@ -12,3 +12,14 @@ submission_package*.zip
 .git_broken_backup_*/
 Источники информации/
 extracted/
+expert_uploads/
+expert_uploaded_text/
+expert_submissions.jsonl
+ui/node_modules/
+ui/dist/
+ui/.npm-cache/
+ui/.npm-logs/
+
+# Tooling artifacts
+.claude/settings.local.json
+.playwright-mcp/

@@ -16,7 +16,7 @@ else:
 
 GRAPH_PATH = Path("graph.json")
 SYNONYMS_PATH = Path("synonyms.json")
-ENTITY_TYPES_FOR_SEARCH = {"Material", "Process", "Property", "Equipment"}
+ENTITY_TYPES_FOR_SEARCH = {"Material", "Process", "Property", "Equipment", "Expert"}
 RU_SEARCH_ENDINGS = (
     "ыми",
     "ими",
@@ -315,6 +315,7 @@ def fact_from_edges(graph, material_id, material_data, process_id, process_data,
         "confidence": edge_data.get("confidence"),
         "year": edge_data.get("year"),
         "location_geo": edge_data.get("location_geo"),
+        "geo_scope": edge_data.get("geo_scope"),
         "lab_or_author": edge_data.get("lab_or_author"),
         "equipment": edge_data.get("equipment"),
         "verification_status": edge_data.get("verification_status"),
@@ -416,6 +417,7 @@ def find_facts(
     year_min=None,
     year_max=None,
     geo=None,
+    geo_scope=None,
     expert=None,
     confidence=None,
     property_query=None,
@@ -444,6 +446,8 @@ def find_facts(
         if not year_matches(fact.get("year"), year_min, year_max):
             continue
         if geo is not None and not field_text_matches(geo, fact.get("location_geo")):
+            continue
+        if geo_scope is not None and clean_text(fact.get("geo_scope")) != clean_text(geo_scope):
             continue
         if expert is not None and not field_text_matches(expert, fact.get("lab_or_author")):
             continue
@@ -515,6 +519,7 @@ def neighbor_row(graph, entity_id, entity_data, source, target, data, direction)
         "confidence": data.get("confidence"),
         "year": data.get("year"),
         "location_geo": data.get("location_geo"),
+        "geo_scope": data.get("geo_scope"),
         "lab_or_author": data.get("lab_or_author"),
         "equipment": data.get("equipment"),
         "verification_status": data.get("verification_status"),
@@ -628,6 +633,11 @@ def free_search(query_text):
         node_id for node_id, data in matched_nodes if data.get("node_type") == "Equipment"
     }
     equipment_processes = equipment_process_ids(graph, equipment_ids)
+    expert_matches = [
+        (node_id, node_label(data))
+        for node_id, data in matched_nodes
+        if data.get("node_type") == "Expert"
+    ]
 
     results = []
     seen = set()
@@ -644,6 +654,12 @@ def free_search(query_text):
             for equipment_id in equipment_ids:
                 matched_id = equipment_id
                 break
+
+        if matched_id is None:
+            for expert_id, expert_name in expert_matches:
+                if field_text_matches(expert_name, fact.get("lab_or_author")):
+                    matched_id = expert_id
+                    break
 
         if matched_id is None:
             continue

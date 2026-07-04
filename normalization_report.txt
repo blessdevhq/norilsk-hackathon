@@ -379,14 +379,17 @@ Node counts by node_type:
   Conclusion: 1816
   Document: 25
   Equipment: 189
+  Expert: 531
   Material: 871
   Process: 557
   Property: 1237
 
 Edge counts by edge_type:
-  from_document: 6981
+  expert_in: 3033
+  from_document: 10096
   studied_in: 2510
   uses_equipment: 770
+  worked_on: 3047
   yields: 2524
 
 Metadata coverage on yields edges:
@@ -395,6 +398,11 @@ Metadata coverage on yields edges:
   with_lab_or_author: 1915
   with_equipment: 1208
   with_conditions: 2195
+  geo_scope:
+    domestic: 414
+    foreign: 344
+    mixed: 28
+    unknown: 1738
 
 Input record counts:
   conclusion: 1816

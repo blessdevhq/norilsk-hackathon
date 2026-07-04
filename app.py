@@ -1,6 +1,9 @@
 import html
 import json
+import re
+import uuid
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 import streamlit as st
@@ -11,38 +14,85 @@ from query_graph import find_facts, free_search, neighbors
 
 
 GRAPH_PATH = Path("graph.json")
+QUALITY_VALIDATION_PATH = Path("quality_validation.json")
+EXPERT_UPLOAD_DIR = Path("expert_uploads")
+EXPERT_TEXT_DIR = Path("expert_uploaded_text")
+EXPERT_SUBMISSIONS_PATH = Path("expert_submissions.jsonl")
 CARD_LIMIT = 40
 DEMO_SOURCE_DOC_COUNT = 25
 PREPARED_TXT_COUNT = 152
+GEO_SCOPE_LABELS = {
+    "": "любая",
+    "domestic": "отечественная",
+    "foreign": "зарубежная",
+    "mixed": "смешанная",
+    "unknown": "не указано",
+}
+PRESET_STATUS_LABELS = {
+    "найдено": "найдено",
+    "частично найдено": "частично найдено",
+    "пробел": "пробел",
+}
 
 DEMO_PRESETS = [
     {
-        "label": "Электроэкстракция никеля",
-        "description": "Параметры, источники, цитаты, confidence и география по никелевым электролитам.",
-        "kind": "facts",
-        "material": "никель",
-        "process": "электроэкстракция",
+        "label": "Обессоливание воды",
+        "description": "Методы для сульфатов, хлоридов и сухого остатка: найдено смежное покрытие, точный режим помечен как пробел.",
+        "queries": [
+            "обессоливание сульфаты хлориды сухой остаток",
+            "шахтные воды обратный осмос сульфаты",
+            "мембранные процессы сульфаты хлориды",
+        ],
+        "filters": [
+            {"material": "шахтные воды", "process": "обратный осмос"},
+            {"process": "обратный осмос"},
+            {"material": "шахтные воды", "property_query": "сульфат"},
+        ],
+        "status": "частично найдено",
+        "status_detail": "Найдены методы очистки и мембранные процессы, но точная связка Ca/Mg/Na 200-300 мг/л и сухой остаток <=1000 мг/дм3 пока требует добора источников.",
     },
     {
-        "label": "Шахтные воды и очистка",
-        "description": "Методы обработки, условия, результаты и готовый аналитический отчет.",
-        "kind": "facts",
-        "material": "шахтные воды",
+        "label": "Циркуляция католита",
+        "description": "Скорость потока и организация циркуляции при электроэкстракции никеля: частичное покрытие по параметрам.",
+        "queries": [
+            "католит циркуляция скорость потока электроэкстракция никеля",
+            "скорость потока электроэкстракция никеля",
+            "электролит циркуляция электроэкстракция",
+        ],
+        "filters": [
+            {"process": "электроэкстракция", "parameter": "скорость"},
+            {"material": "никель", "process": "электроэкстракция"},
+        ],
+        "status": "частично найдено",
+        "status_detail": "Есть факты по электролиту, скорости потока и электроэкстракции, но корпус не дает полного обзора всех схем циркуляции католита.",
     },
     {
-        "label": "МПГ, штейн и шлак",
-        "description": "Междисциплинарный поиск по МПГ, штейнам, шлакам и переделам.",
-        "kind": "search",
-        "query": "МПГ",
+        "label": "Au/Ag/МПГ: штейн и шлак",
+        "description": "Распределение драгоценных металлов между штейном и шлаком за последние годы: найдено частично.",
+        "queries": [
+            "Au Ag МПГ штейн шлак распределение",
+            "МПГ штейн шлак",
+            "серебро золото шлак",
+        ],
+        "filters": [
+            {"material": "МПГ"},
+            {"material": "шлак", "process": "распределение", "year_min": 2021, "year_max": 2025},
+            {"property_query": "извлечение МПГ"},
+        ],
+        "status": "частично найдено",
+        "status_detail": "Найдены факты по МПГ, шлакам, штейнам и отдельным годам; полный срез Au/Ag/МПГ за 5 лет остается зоной расширения корпуса.",
     },
     {
-        "label": "Выщелачивание 40-60 C",
-        "description": "Числовой срез условий: температура, процесс и результат в одной карточке факта.",
-        "kind": "facts",
-        "process": "выщелачивание",
-        "parameter": "температура",
-        "value_min": 40,
-        "value_max": 60,
+        "label": "Закачка шахтных вод",
+        "description": "Поиск способов закачки в глубокие горизонты: в демо-корпусе это в основном пробел.",
+        "queries": [
+            "закачка шахтных вод глубокие горизонты",
+            "шахтные воды глубокие горизонты",
+            "технико-экономические показатели закачки шахтных вод",
+        ],
+        "filters": [],
+        "status": "пробел",
+        "status_detail": "Корпус содержит материалы по очистке шахтных вод, но почти не содержит структурированных фактов о закачке в глубокие горизонты и технико-экономике.",
     },
 ]
 
@@ -64,6 +114,7 @@ RELATION_COLUMNS = {
     "source_quote": "Цитата",
     "year": "Год",
     "location_geo": "География",
+    "geo_scope": "Практика",
     "lab_or_author": "Эксперт / организация",
     "confidence": "Confidence",
     "value": "Значение",
@@ -77,6 +128,7 @@ EVIDENCE_COLUMNS = {
     "conditions": "Условия",
     "year": "Год",
     "location_geo": "География",
+    "geo_scope": "Практика",
     "lab_or_author": "Эксперт / организация",
     "source_file": "Источник",
     "source_quote": "Цитата",
@@ -108,6 +160,217 @@ def top_entities(nodes, node_type, limit=6):
 
 
 @st.cache_data(show_spinner=False)
+def load_quality_validation():
+    if not QUALITY_VALIDATION_PATH.exists():
+        return [], f"Файл {QUALITY_VALIDATION_PATH} не найден."
+
+    try:
+        rows = json.loads(QUALITY_VALIDATION_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return [], f"Не удалось прочитать {QUALITY_VALIDATION_PATH}: {exc}"
+
+    if not isinstance(rows, list):
+        return [], f"{QUALITY_VALIDATION_PATH} должен содержать JSON-массив."
+
+    return rows, None
+
+
+def now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def safe_upload_name(name):
+    stem = Path(str(name or "upload")).stem
+    suffix = Path(str(name or "")).suffix.lower()
+    safe_stem = re.sub(r"[^A-Za-zА-Яа-яЁё0-9_.-]+", "_", stem).strip("._")
+    if not safe_stem:
+        safe_stem = "upload"
+    if suffix not in {".pdf", ".docx", ".txt"}:
+        suffix = ".bin"
+    return f"{safe_stem[:80]}{suffix}"
+
+
+def load_expert_submissions(path=EXPERT_SUBMISSIONS_PATH):
+    if not path.exists():
+        return []
+
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except Exception:
+            continue
+    return rows
+
+
+def write_expert_submissions(rows, path=EXPERT_SUBMISSIONS_PATH):
+    path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def append_expert_submission(row, path=EXPERT_SUBMISSIONS_PATH):
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def update_expert_submission_status(submission_id, status, reviewer_note=""):
+    rows = load_expert_submissions()
+    changed = False
+    for row in rows:
+        if row.get("submission_id") != submission_id:
+            continue
+        row["status"] = status
+        row["reviewed_at"] = now_iso()
+        if reviewer_note:
+            row["reviewer_note"] = reviewer_note
+        changed = True
+        break
+
+    if changed:
+        write_expert_submissions(rows)
+    return changed
+
+
+def extract_text_from_upload(upload_path):
+    suffix = upload_path.suffix.lower()
+    if suffix == ".txt":
+        return upload_path.read_text(encoding="utf-8", errors="ignore").strip()
+    if suffix == ".pdf":
+        from ingest import extract_pdf_text
+
+        return extract_pdf_text(upload_path)
+    if suffix == ".docx":
+        from ingest import extract_docx_text
+
+        return extract_docx_text(upload_path)
+    raise ValueError("Поддерживаются только PDF, DOCX и TXT.")
+
+
+def llm_config_status():
+    try:
+        from config import API_KEY, BASE_URL, MODEL_NAME
+    except Exception as exc:
+        return False, f"config.py недоступен: {exc}"
+
+    if not API_KEY or not BASE_URL or not MODEL_NAME:
+        return False, "BASE_URL, API_KEY или MODEL_NAME не заданы."
+    return True, f"{MODEL_NAME} через {BASE_URL}"
+
+
+def run_quarantine_llm(text, source_file, max_chunks=1):
+    from config import API_KEY, BASE_URL
+    from extract_facts import (
+        DOCUMENT_CONTEXT_CHARS,
+        chunk_text,
+        conclusion_to_record,
+        extract_chunk,
+        fact_to_record,
+    )
+    from openai import OpenAI
+
+    client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
+    chunks = chunk_text(text)[:max_chunks]
+    document_context = text[:DOCUMENT_CONTEXT_CHARS]
+    records = []
+
+    for index, chunk in enumerate(chunks, start=1):
+        result = extract_chunk(client, document_context, chunk, source_file, index)
+        facts = result.get("facts", [])
+        conclusions = result.get("conclusions", [])
+        records.extend(fact_to_record(fact, source_file, index) for fact in facts)
+        records.extend(conclusion_to_record(item, source_file, index) for item in conclusions)
+
+    records = [record for record in records if record is not None]
+    return records, len(chunks)
+
+
+def fact_record_preview(record):
+    material = record.get("material") if isinstance(record.get("material"), dict) else {}
+    process = record.get("process") if isinstance(record.get("process"), dict) else {}
+    result = record.get("result") if isinstance(record.get("result"), dict) else {}
+    context = record.get("context") if isinstance(record.get("context"), dict) else {}
+    return {
+        "Тип": record.get("record_type"),
+        "Материал": material.get("name"),
+        "Процесс": process.get("name"),
+        "Показатель": result.get("property"),
+        "Значение": result.get("value"),
+        "Ед.": result.get("unit"),
+        "География": context.get("location_geo"),
+        "Эксперт": context.get("lab_or_author"),
+        "Цитата": record.get("source_quote") or record.get("text"),
+    }
+
+
+def build_manual_submission(
+    expert_name,
+    material,
+    process,
+    result_property,
+    result_value,
+    result_unit,
+    condition_parameter,
+    condition_value,
+    condition_unit,
+    location_geo,
+    source_quote,
+    comment,
+):
+    source_file = f"expert_manual_{uuid.uuid4().hex}.txt"
+    conditions = []
+    if condition_parameter or condition_value or condition_unit:
+        conditions.append(
+            {
+                "parameter": condition_parameter or None,
+                "value": condition_value or None,
+                "unit": condition_unit or None,
+            }
+        )
+
+    record = {
+        "record_type": "fact",
+        "source_file": source_file,
+        "chunk_id": 1,
+        "material": {"name": material or None, "type": "другое", "composition_note": None},
+        "process": {"name": process or None, "label": None, "description": None},
+        "conditions": conditions,
+        "result": {
+            "property": result_property or None,
+            "value": result_value or None,
+            "unit": result_unit or None,
+            "direction": None,
+        },
+        "context": {
+            "equipment": None,
+            "location_geo": location_geo or None,
+            "year": None,
+            "lab_or_author": expert_name or None,
+        },
+        "confidence": "medium",
+        "source_quote": source_quote or comment or "ручной ввод эксперта",
+    }
+
+    return {
+        "submission_id": uuid.uuid4().hex,
+        "submitted_at": now_iso(),
+        "submitted_by": expert_name or "не указано",
+        "source_file": source_file,
+        "submission_type": "manual_fact",
+        "status": "needs_review",
+        "llm_status": "manual",
+        "text_size": 0,
+        "facts_count": 1,
+        "conclusions_count": 0,
+        "comment": comment,
+        "records": [record],
+    }
+
+
+@st.cache_data(show_spinner=False)
 def load_graph_stats(graph_mtime_value):
     try:
         data = json.loads(GRAPH_PATH.read_text(encoding="utf-8"))
@@ -118,6 +381,7 @@ def load_graph_stats(graph_mtime_value):
     links = data.get("links", data.get("edges", []))
     yields_edges = [edge for edge in links if edge.get("edge_type") == "yields"]
     confidence_counts = Counter(str(edge.get("confidence") or "unknown").lower() for edge in yields_edges)
+    geo_scope_counts = Counter(str(edge.get("geo_scope") or "unknown").lower() for edge in yields_edges)
     graph_meta = data.get("graph", {})
 
     def has_digit(value):
@@ -131,7 +395,7 @@ def load_graph_stats(graph_mtime_value):
         "materials": sum(1 for node in nodes if node.get("node_type") == "Material"),
         "processes": sum(1 for node in nodes if node.get("node_type") == "Process"),
         "properties": sum(1 for node in nodes if node.get("node_type") == "Property"),
-        "experts": sum(1 for edge in yields_edges if edge.get("lab_or_author")),
+        "experts": sum(1 for node in nodes if node.get("node_type") == "Expert"),
         "with_year": sum(1 for edge in yields_edges if edge.get("year") is not None),
         "with_geo": sum(1 for edge in yields_edges if edge.get("location_geo")),
         "with_expert": sum(1 for edge in yields_edges if edge.get("lab_or_author")),
@@ -140,9 +404,11 @@ def load_graph_stats(graph_mtime_value):
         "updated_at": graph_meta.get("updated_at"),
         "verification_status": graph_meta.get("verification_status"),
         "confidence_counts": dict(confidence_counts),
+        "geo_scope_counts": dict(geo_scope_counts),
         "top_materials": top_entities(nodes, "Material"),
         "top_processes": top_entities(nodes, "Process"),
         "top_properties": top_entities(nodes, "Property"),
+        "top_experts": top_entities(nodes, "Expert"),
         "error": None,
     }
 
@@ -195,36 +461,53 @@ def merge_results(*groups):
     return merged
 
 
+def get_preset(label):
+    return next((item for item in DEMO_PRESETS if item["label"] == label), None)
+
+
 def demo_preset_results(label):
-    preset = next((item for item in DEMO_PRESETS if item["label"] == label), None)
+    preset = get_preset(label)
     if not preset:
         return []
 
-    kind = preset.get("kind")
-    if kind == "search":
-        query = preset["query"]
-        return merge_results(free_search(query), find_facts(material=query))
+    groups = []
 
-    if kind == "facts":
-        return find_facts(
-            material=preset.get("material"),
-            process=preset.get("process"),
-            property_query=preset.get("property_query"),
-            parameter=preset.get("parameter"),
-            value_min=preset.get("value_min"),
-            value_max=preset.get("value_max"),
-            unit=preset.get("unit"),
-            result_value_min=preset.get("result_value_min"),
-            result_value_max=preset.get("result_value_max"),
-            result_unit=preset.get("result_unit"),
-            year_min=preset.get("year_min"),
-            year_max=preset.get("year_max"),
-            geo=preset.get("geo"),
-            expert=preset.get("expert"),
-            confidence=preset.get("confidence"),
-        )
+    for query in preset.get("queries", []):
+        groups.append(free_search(query))
 
-    return []
+    for filters in preset.get("filters", []):
+        groups.append(find_facts(**filters))
+
+    return merge_results(*groups)
+
+
+def demo_preset_status(label, results=None):
+    preset = get_preset(label)
+    if not preset:
+        return "пробел", "Сценарий не найден."
+
+    if results is not None and not results:
+        return "пробел", "В текущем графе нет структурированных фактов для этого сценария."
+
+    return preset.get("status", "найдено"), preset.get("status_detail", "")
+
+
+def render_preset_status(label, results):
+    status, detail = demo_preset_status(label, results)
+    css_status = {
+        "найдено": "found",
+        "частично найдено": "partial",
+        "пробел": "gap",
+    }.get(status, "partial")
+    st.markdown(
+        f"""
+        <div class="preset-status {css_status}">
+          <strong>{html.escape(PRESET_STATUS_LABELS.get(status, status))}</strong>
+          <span>{html.escape(detail)}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def clean_display(value, fallback="не указано"):
@@ -342,6 +625,7 @@ def render_fact_row(fact, index=0):
             ("Источник", fact.get("source_file")),
             ("Год", fact.get("year")),
             ("География", fact.get("location_geo")),
+            ("Практика", GEO_SCOPE_LABELS.get(str(fact.get("geo_scope") or "unknown"), fact.get("geo_scope"))),
             ("Эксперт / организация", fact.get("lab_or_author")),
             ("Оборудование", fact.get("equipment")),
             ("Chunk", fact.get("chunk_id")),
@@ -451,14 +735,16 @@ def render_page_header(stats):
         unsafe_allow_html=True,
     )
 
-    cols = st.columns(4)
+    cols = st.columns(5)
     with cols[0]:
         render_metric("Документы", stats.get("documents", 0), f"демо; {PREPARED_TXT_COUNT} txt готово")
     with cols[1]:
         render_metric("Факты", stats.get("facts", 0), "структурированные связи")
     with cols[2]:
-        render_metric("Узлы / связи", f"{stats.get('nodes', 0)} / {stats.get('links', 0)}", "граф знаний")
+        render_metric("Эксперты", stats.get("experts", 0), "узлы Expert")
     with cols[3]:
+        render_metric("Узлы / связи", f"{stats.get('nodes', 0)} / {stats.get('links', 0)}", "граф знаний")
+    with cols[4]:
         render_metric("С условиями", stats.get("with_conditions", 0), "параметры процессов")
 
 
@@ -492,6 +778,7 @@ def render_overview_tab(stats):
     st.caption("Четыре сценария из логики ТЗ: проверяемый ответ, междисциплинарный поиск и пробелы R&D.")
     selected = render_scenario_picker("overview")
     results = demo_preset_results(selected)
+    render_preset_status(selected, results)
     show_fact_results(selected, results, limit=8)
 
     st.markdown("### Почему это не RAG-чат")
@@ -541,7 +828,13 @@ def render_overview_tab(stats):
 def localized_rows(rows, column_map):
     table_rows = []
     for row in rows or []:
-        table_rows.append({label: row.get(key) for key, label in column_map.items()})
+        table_row = {}
+        for key, label in column_map.items():
+            value = row.get(key)
+            if key == "geo_scope":
+                value = GEO_SCOPE_LABELS.get(str(value or "unknown"), value)
+            table_row[label] = value
+        table_rows.append(table_row)
     return table_rows
 
 
@@ -602,6 +895,7 @@ def render_answer_tab():
     facts = demo_preset_results(selected)
     answer = build_answer(selected, facts)
 
+    render_preset_status(selected, facts)
     render_answer_metrics(answer)
     st.markdown(
         f"""
@@ -733,9 +1027,15 @@ def collect_filter_kwargs(prefix):
         year_max_text = col8.text_input("Год до", key=f"{prefix}_year_max", placeholder="2025")
         filter_geo = col9.text_input("География", key=f"{prefix}_geo", placeholder="Россия")
 
-        col10, col11 = st.columns(2)
-        filter_expert = col10.text_input("Эксперт / организация", key=f"{prefix}_expert", placeholder="Гипроникель")
-        confidence_choice = col11.selectbox(
+        col10, col11, col12 = st.columns(3)
+        geo_scope_choice = col10.selectbox(
+            "Практика",
+            ["", "domestic", "foreign", "mixed", "unknown"],
+            format_func=lambda value: GEO_SCOPE_LABELS.get(value, value),
+            key=f"{prefix}_geo_scope",
+        )
+        filter_expert = col11.text_input("Эксперт / организация", key=f"{prefix}_expert", placeholder="Гипроникель")
+        confidence_choice = col12.selectbox(
             "Confidence",
             ["", "high", "medium", "low"],
             format_func=lambda value: value or "любой",
@@ -752,6 +1052,7 @@ def collect_filter_kwargs(prefix):
         year_min_text,
         year_max_text,
         filter_geo,
+        geo_scope_choice,
         filter_expert,
         confidence_choice,
     ]
@@ -766,6 +1067,7 @@ def collect_filter_kwargs(prefix):
         "year_min": optional_float(year_min_text),
         "year_max": optional_float(year_max_text),
         "geo": filter_geo.strip() or None,
+        "geo_scope": geo_scope_choice or None,
         "expert": filter_expert.strip() or None,
         "confidence": confidence_choice or None,
     }
@@ -792,8 +1094,10 @@ def render_search_tab():
     if query.strip() or filters_used:
         show_fact_results("Результаты", results)
     else:
-        selected = render_scenario_picker("search", default_label=DEMO_PRESETS[1]["label"])
-        show_fact_results(selected, demo_preset_results(selected), limit=6)
+        selected = render_scenario_picker("search", default_label=DEMO_PRESETS[0]["label"])
+        preset_results = demo_preset_results(selected)
+        render_preset_status(selected, preset_results)
+        show_fact_results(selected, preset_results, limit=6)
 
 
 def render_gap_candidate(gap, axis1_label, axis2_label):
@@ -893,6 +1197,216 @@ def render_relations_tab():
         st.error(f"Ошибка поиска связей: {exc}")
 
 
+def render_submission_status_counts(rows):
+    counts = Counter(row.get("status", "unknown") for row in rows)
+    cols = st.columns(4)
+    cols[0].metric("На проверке", counts.get("needs_review", 0))
+    cols[1].metric("Принято", counts.get("approved", 0))
+    cols[2].metric("Отклонено", counts.get("rejected", 0))
+    cols[3].metric("Всего", len(rows))
+
+
+def render_upload_submission_form():
+    st.markdown("#### Загрузка файла")
+    config_ok, config_text = llm_config_status()
+    st.caption(
+        "Файл сохраняется в карантин. LLM-извлечение запускается только если задан API_KEY; "
+        "основной graph.json не меняется до экспертного approve."
+    )
+    st.caption(f"LLM: {config_text}")
+
+    with st.form("expert_upload_form", clear_on_submit=False):
+        expert_name = st.text_input("Эксперт / организация", key="upload_expert_name")
+        uploaded = st.file_uploader("PDF, DOCX или TXT", type=["pdf", "docx", "txt"], key="expert_file_upload")
+        run_llm = st.checkbox("Сразу извлечь факты через LLM", value=config_ok, disabled=not config_ok)
+        max_chunks = st.slider("Чанков для live-извлечения", 1, 3, 1)
+        comment = st.text_area("Комментарий к загрузке", key="upload_comment")
+        submitted = st.form_submit_button("Добавить в карантин", use_container_width=True)
+
+    if not submitted:
+        return
+    if uploaded is None:
+        st.warning("Выберите файл.")
+        return
+
+    EXPERT_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    EXPERT_TEXT_DIR.mkdir(parents=True, exist_ok=True)
+
+    upload_id = uuid.uuid4().hex
+    safe_name = safe_upload_name(uploaded.name)
+    upload_path = EXPERT_UPLOAD_DIR / f"{upload_id}_{safe_name}"
+    text_path = EXPERT_TEXT_DIR / f"{upload_id}_{Path(safe_name).stem}.txt"
+
+    try:
+        upload_path.write_bytes(uploaded.getvalue())
+        text = extract_text_from_upload(upload_path)
+        text_path.write_text(text, encoding="utf-8")
+    except Exception as exc:
+        row = {
+            "submission_id": upload_id,
+            "submitted_at": now_iso(),
+            "submitted_by": expert_name or "не указано",
+            "source_file": uploaded.name,
+            "stored_file": str(upload_path),
+            "submission_type": "file_upload",
+            "status": "extraction_failed",
+            "llm_status": "not_started",
+            "text_size": 0,
+            "facts_count": 0,
+            "conclusions_count": 0,
+            "comment": comment,
+            "error": str(exc),
+            "records": [],
+        }
+        append_expert_submission(row)
+        st.error(f"Файл сохранен, но текст извлечь не удалось: {exc}")
+        return
+
+    records = []
+    chunks_processed = 0
+    llm_status = "skipped"
+    llm_error = None
+    if run_llm and config_ok:
+        try:
+            records, chunks_processed = run_quarantine_llm(text, uploaded.name, max_chunks=max_chunks)
+            llm_status = "ok" if records else "empty"
+        except Exception as exc:
+            llm_status = "failed"
+            llm_error = str(exc)
+
+    facts_count = sum(1 for record in records if record.get("record_type") == "fact")
+    conclusions_count = sum(1 for record in records if record.get("record_type") == "conclusion")
+    row = {
+        "submission_id": upload_id,
+        "submitted_at": now_iso(),
+        "submitted_by": expert_name or "не указано",
+        "source_file": uploaded.name,
+        "stored_file": str(upload_path),
+        "extracted_text_file": str(text_path),
+        "submission_type": "file_upload",
+        "status": "needs_review" if records else "submitted",
+        "llm_status": llm_status,
+        "llm_error": llm_error,
+        "chunks_processed": chunks_processed,
+        "text_size": len(text),
+        "facts_count": facts_count,
+        "conclusions_count": conclusions_count,
+        "comment": comment,
+        "records": records,
+    }
+    append_expert_submission(row)
+    st.success(
+        "Заявка добавлена в карантин: "
+        f"text={len(text)} chars, facts={facts_count}, conclusions={conclusions_count}, llm={llm_status}."
+    )
+
+
+def render_manual_fact_form():
+    st.markdown("#### Ручной факт от эксперта")
+    with st.form("manual_fact_form", clear_on_submit=True):
+        col1, col2 = st.columns(2)
+        expert_name = col1.text_input("Эксперт / организация", key="manual_expert")
+        location_geo = col2.text_input("География", key="manual_geo")
+        material = col1.text_input("Материал", key="manual_material")
+        process = col2.text_input("Процесс", key="manual_process")
+        result_property = col1.text_input("Показатель", key="manual_result_property")
+        result_value = col2.text_input("Значение результата", key="manual_result_value")
+        result_unit = col1.text_input("Единица результата", key="manual_result_unit")
+        condition_parameter = col2.text_input("Параметр условия", key="manual_condition_parameter")
+        condition_value = col1.text_input("Значение условия", key="manual_condition_value")
+        condition_unit = col2.text_input("Единица условия", key="manual_condition_unit")
+        source_quote = st.text_area("Опорная цитата / основание", key="manual_quote")
+        comment = st.text_area("Комментарий эксперта", key="manual_comment")
+        submitted = st.form_submit_button("Отправить факт на проверку", use_container_width=True)
+
+    if not submitted:
+        return
+    if not (material or process or result_property or source_quote or comment):
+        st.warning("Заполните хотя бы материал/процесс/показатель или основание.")
+        return
+
+    row = build_manual_submission(
+        expert_name=expert_name,
+        material=material,
+        process=process,
+        result_property=result_property,
+        result_value=result_value,
+        result_unit=result_unit,
+        condition_parameter=condition_parameter,
+        condition_value=condition_value,
+        condition_unit=condition_unit,
+        location_geo=location_geo,
+        source_quote=source_quote,
+        comment=comment,
+    )
+    append_expert_submission(row)
+    st.success("Ручной факт добавлен в карантин со статусом needs_review.")
+
+
+def render_submission_review(rows):
+    st.markdown("#### Очередь проверки")
+    if not rows:
+        st.info("Пока нет экспертных заявок. Загрузите файл или добавьте факт вручную.")
+        return
+
+    for row in sorted(rows, key=lambda item: item.get("submitted_at", ""), reverse=True)[:12]:
+        title = (
+            f"{row.get('source_file', 'заявка')} | {row.get('status')} | "
+            f"facts={row.get('facts_count', 0)} | text={row.get('text_size', 0)}"
+        )
+        with st.expander(title):
+            st.write(
+                {
+                    "submission_id": row.get("submission_id"),
+                    "submitted_at": row.get("submitted_at"),
+                    "submitted_by": row.get("submitted_by"),
+                    "submission_type": row.get("submission_type"),
+                    "llm_status": row.get("llm_status"),
+                    "chunks_processed": row.get("chunks_processed"),
+                    "comment": row.get("comment"),
+                    "error": row.get("error") or row.get("llm_error"),
+                }
+            )
+
+            records = row.get("records") if isinstance(row.get("records"), list) else []
+            if records:
+                st.dataframe(
+                    [fact_record_preview(record) for record in records[:30]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.caption("Факты пока не извлечены. Файл находится в очереди или LLM был недоступен.")
+
+            if row.get("status") in {"needs_review", "submitted"}:
+                col1, col2 = st.columns(2)
+                if col1.button("Approve", key=f"approve_{row.get('submission_id')}", use_container_width=True):
+                    update_expert_submission_status(row.get("submission_id"), "approved")
+                    st.rerun()
+                if col2.button("Reject", key=f"reject_{row.get('submission_id')}", use_container_width=True):
+                    update_expert_submission_status(row.get("submission_id"), "rejected")
+                    st.rerun()
+
+
+def render_submission_tab():
+    st.markdown("### Пополнение базы")
+    st.caption(
+        "Эксперт может загрузить новый PDF/DOCX/TXT или добавить факт вручную. "
+        "Все новые данные попадают в карантин `expert_submissions.jsonl`; основной граф не меняется без отдельной проверки."
+    )
+
+    rows = load_expert_submissions()
+    render_submission_status_counts(rows)
+
+    upload_tab, manual_tab, review_tab = st.tabs(["Загрузка файла", "Ручной факт", "Очередь проверки"])
+    with upload_tab:
+        render_upload_submission_form()
+    with manual_tab:
+        render_manual_fact_form()
+    with review_tab:
+        render_submission_review(load_expert_submissions())
+
+
 def render_quality_tab(stats):
     st.markdown("### Качество данных")
     st.caption("Этот экран показывает покрытие корпуса и ограничения MVP. Он нужен для честной демонстрации статуса данных.")
@@ -911,6 +1425,14 @@ def render_quality_tab(stats):
     confidence_cols[2].metric("Low", confidence_counts.get("low", 0))
     confidence_cols[3].metric("Unknown", confidence_counts.get("unknown", 0))
 
+    st.markdown("### География практики")
+    geo_scope_counts = stats.get("geo_scope_counts", {})
+    geo_cols = st.columns(4)
+    geo_cols[0].metric("Отечественная", geo_scope_counts.get("domestic", 0))
+    geo_cols[1].metric("Зарубежная", geo_scope_counts.get("foreign", 0))
+    geo_cols[2].metric("Смешанная", geo_scope_counts.get("mixed", 0))
+    geo_cols[3].metric("Не указано", geo_scope_counts.get("unknown", 0))
+
     st.markdown(
         f"""
         <div class="verification-box">
@@ -922,11 +1444,27 @@ def render_quality_tab(stats):
         unsafe_allow_html=True,
     )
 
-    col1, col2, col3 = st.columns(3)
+    validation_rows, validation_error = load_quality_validation()
+    st.markdown("### Мини-валидация фактов")
+    if validation_error:
+        st.warning(validation_error)
+    elif validation_rows:
+        validation_counts = Counter(str(row.get("status") or "не указано") for row in validation_rows)
+        validation_cols = st.columns(4)
+        validation_cols[0].metric("Верно", validation_counts.get("верно", 0))
+        validation_cols[1].metric("Частично", validation_counts.get("частично", 0))
+        validation_cols[2].metric("Ошибка", validation_counts.get("ошибка", 0))
+        validation_cols[3].metric("Всего", len(validation_rows))
+        st.dataframe(validation_rows, use_container_width=True, hide_index=True)
+    else:
+        st.caption("Валидационные строки отсутствуют.")
+
+    col1, col2, col3, col4 = st.columns(4)
     for title, rows, column in [
         ("Топ материалов", stats.get("top_materials", []), col1),
         ("Топ процессов", stats.get("top_processes", []), col2),
         ("Топ показателей", stats.get("top_properties", []), col3),
+        ("Топ экспертов", stats.get("top_experts", []), col4),
     ]:
         with column:
             st.markdown(f"#### {title}")
@@ -1023,6 +1561,45 @@ def css():
           }
           .scenario-note.active {
             color: var(--text);
+          }
+          .preset-status {
+            border-radius: 8px;
+            padding: 0.75rem 0.9rem;
+            margin: 0.8rem 0 1rem;
+            line-height: 1.45;
+            border: 1px solid rgba(154, 164, 178, 0.28);
+            background: rgba(154, 164, 178, 0.08);
+          }
+          .preset-status strong {
+            display: inline-block;
+            margin-right: 0.6rem;
+            text-transform: uppercase;
+            font-size: 0.76rem;
+            letter-spacing: 0.04em;
+          }
+          .preset-status span {
+            color: #d7dde8;
+          }
+          .preset-status.found {
+            border-color: rgba(103, 193, 181, 0.35);
+            background: rgba(103, 193, 181, 0.08);
+          }
+          .preset-status.found strong {
+            color: var(--accent);
+          }
+          .preset-status.partial {
+            border-color: rgba(199, 179, 106, 0.35);
+            background: rgba(199, 179, 106, 0.08);
+          }
+          .preset-status.partial strong {
+            color: var(--accent-2);
+          }
+          .preset-status.gap {
+            border-color: rgba(211, 123, 123, 0.35);
+            background: rgba(211, 123, 123, 0.08);
+          }
+          .preset-status.gap strong {
+            color: var(--danger);
           }
           .evidence-panel strong {
             color: var(--text);
@@ -1235,8 +1812,16 @@ def main():
 
     render_page_header(stats)
 
-    overview_tab, answer_tab, search_tab, gap_tab, relations_tab, quality_tab = st.tabs(
-        ["Обзор", "Аналитический ответ", "Поиск", "Матрица пробелов", "Связи", "Качество данных"]
+    overview_tab, answer_tab, search_tab, gap_tab, relations_tab, submission_tab, quality_tab = st.tabs(
+        [
+            "Обзор",
+            "Аналитический ответ",
+            "Поиск",
+            "Матрица пробелов",
+            "Связи",
+            "Пополнение базы",
+            "Качество данных",
+        ]
     )
 
     with overview_tab:
@@ -1253,6 +1838,9 @@ def main():
 
     with relations_tab:
         render_relations_tab()
+
+    with submission_tab:
+        render_submission_tab()
 
     with quality_tab:
         render_quality_tab(stats)

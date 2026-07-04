@@ -23,6 +23,56 @@ SYNONYMS_PATH = Path("synonyms.json")
 
 NULL_STRINGS = {"", "null", "none", "нет", "не указано"}
 EQUIPMENT_MIN_COUNT = 2
+GEO_SCOPE_VALUES = {"domestic", "foreign", "mixed", "unknown"}
+GEO_DOMESTIC_MARKERS = {
+    "россия",
+    "рф",
+    "россий",
+    "кольская",
+    "кгмк",
+    "норильск",
+    "норникель",
+    "гипроникель",
+    "мончегорск",
+    "мурманск",
+    "печенг",
+    "красноярск",
+    "забайкаль",
+    "магнитогорск",
+}
+GEO_FOREIGN_MARKERS = {
+    "австрали",
+    "англи",
+    "африк",
+    "германи",
+    "грузи",
+    "канада",
+    "квебек",
+    "китай",
+    "нидерланд",
+    "норвеги",
+    "серби",
+    "сша",
+    "финлянди",
+    "чили",
+    "юар",
+    "япони",
+    "anglo",
+    "beatrix",
+    "garson",
+    "glencore",
+    "lonmin",
+    "mitsubishi",
+    "nikkelverk",
+    "niihama",
+    "outotec",
+    "paques",
+    "raglan",
+    "rtb bor",
+    "totten",
+    "waterval",
+}
+EXPERT_NULL_STRINGS = NULL_STRINGS | {"unknown", "not specified", "нет данных", "н/д", "др.", "и др."}
 
 STARTER_SYNONYMS = {
     "цианидное выщелачивание": ["цианирование"],
@@ -74,6 +124,57 @@ def clean_value(value):
             return None
         return collapse_spaces(text)
     return value
+
+
+def normalize_geo_scope(location_geo=None, lab_or_author=None):
+    parts = []
+    for value in (location_geo, lab_or_author):
+        cleaned = clean_value(value)
+        if cleaned is not None:
+            parts.append(str(cleaned).lower())
+
+    if not parts:
+        return "unknown"
+
+    text = " ".join(parts)
+    is_domestic = any(marker in text for marker in GEO_DOMESTIC_MARKERS)
+    is_foreign = any(marker in text for marker in GEO_FOREIGN_MARKERS)
+
+    if is_domestic and is_foreign:
+        return "mixed"
+    if is_domestic:
+        return "domestic"
+    if is_foreign:
+        return "foreign"
+    return "unknown"
+
+
+def split_experts(value):
+    text = clean_value(value)
+    if text is None:
+        return []
+
+    text = str(text)
+    text = re.sub(r"\s+и\s+(?!др\b)", ";", text, flags=re.IGNORECASE)
+    chunks = re.split(r"[;,]", text)
+
+    experts = []
+    seen = set()
+    for chunk in chunks:
+        name = clean_value(chunk)
+        if name is None:
+            continue
+
+        key = str(name).strip().lower()
+        if key in EXPERT_NULL_STRINGS or len(key) < 2:
+            continue
+        if key in seen:
+            continue
+
+        seen.add(key)
+        experts.append(str(name))
+
+    return experts
 
 
 def normalize_layer1(value):
@@ -440,6 +541,26 @@ def ensure_equipment_node(graph, info, alias_counter, mention_count):
     return equipment_id
 
 
+def ensure_expert_node(graph, expert_name):
+    name = clean_value(expert_name)
+    if name is None:
+        return None
+
+    expert_id = node_id("Expert", name)
+    if not graph.has_node(expert_id):
+        graph.add_node(
+            expert_id,
+            node_type="Expert",
+            name=name,
+            display_name=name,
+            mention_count=0,
+        )
+
+    data = graph.nodes[expert_id]
+    data["mention_count"] = data.get("mention_count", 0) + 1
+    return expert_id
+
+
 def ensure_conclusion_node(graph, source_file, chunk_id, line_number, text, confidence):
     conclusion_id = f"Conclusion:{source_file}:{chunk_id}:{line_number}"
     if not graph.has_node(conclusion_id):
@@ -506,6 +627,10 @@ def base_edge_attrs(record, source_file, chunk_id, updated_at):
     for key, value in context_fields.items():
         if value is not None:
             attrs[key] = value
+    attrs["geo_scope"] = normalize_geo_scope(
+        context_fields.get("location_geo"),
+        context_fields.get("lab_or_author"),
+    )
 
     return attrs
 
@@ -647,6 +772,17 @@ def build_graph(records, synonym_map):
                 equipment_counts[equipment_info["name"]],
             )
             add_typed_edge(graph, process_id, equipment_id, "uses_equipment", edge_attrs)
+
+        for expert_name in split_experts(context.get("lab_or_author")):
+            expert_id = ensure_expert_node(graph, expert_name)
+            if expert_id is None:
+                continue
+
+            add_typed_edge(graph, expert_id, document_id, "from_document", edge_attrs)
+            if process_id is not None:
+                add_typed_edge(graph, expert_id, process_id, "expert_in", edge_attrs)
+            if material_id is not None:
+                add_typed_edge(graph, expert_id, material_id, "worked_on", edge_attrs)
 
     stats = {
         "record_type_counts": record_type_counts,
@@ -838,6 +974,10 @@ def write_report(path, graph, stats):
     lines.append(f"  with_lab_or_author: {sum(1 for edge in yields_edges if edge.get('lab_or_author'))}")
     lines.append(f"  with_equipment: {sum(1 for edge in yields_edges if edge.get('equipment'))}")
     lines.append(f"  with_conditions: {sum(1 for edge in yields_edges if edge.get('conditions'))}")
+    geo_scope_counts = Counter(edge.get("geo_scope", "unknown") for edge in yields_edges)
+    lines.append("  geo_scope:")
+    for scope in sorted(GEO_SCOPE_VALUES):
+        lines.append(f"    {scope}: {geo_scope_counts.get(scope, 0)}")
 
     lines.append("")
     lines.append("Input record counts:")
