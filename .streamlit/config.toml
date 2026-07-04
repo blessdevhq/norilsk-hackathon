@@ -1,0 +1,6 @@
+[theme]
+base = "dark"
+primaryColor = "#3ddc97"
+
+[browser]
+gatherUsageStats = false

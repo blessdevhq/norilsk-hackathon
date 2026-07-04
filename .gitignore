@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.log
+*.err
+*.out
+streamlit.err.log
+streamlit.out.log
+failed_raw_*.txt
+.streamlit/secrets.toml
+.env
+submission_package*.zip
+.git_broken_backup_*/
+Источники информации/
+extracted/
