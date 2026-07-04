@@ -5,9 +5,11 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from answer_synthesizer import build_answer
+from export_jsonld import facts_to_jsonld, graph_to_jsonld
 from gap_matrix import build_matrix, gaps
 from query_graph import (
     find_facts,
@@ -76,6 +78,11 @@ class SubgraphRequest(BaseModel):
     facts: List[Dict[str, Any]] = Field(default_factory=list)
     matrixCell: Optional[MatrixCellContext] = None
     limit: int = 8
+
+
+class ExportRequest(BaseModel):
+    title: str = "Результат запроса"
+    facts: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 app = FastAPI(title="Научный клубок API", version="1.0")
@@ -456,6 +463,27 @@ def matrix(
         "gaps": gap_rows,
     }
     return sanitize(response)
+
+
+@app.get("/api/export/jsonld")
+def export_graph_jsonld():
+    graph = graph_or_404()
+    document = graph_to_jsonld(graph)
+    return JSONResponse(
+        content=sanitize(document),
+        media_type="application/ld+json",
+        headers={"Content-Disposition": 'attachment; filename="knowledge-graph.jsonld"'},
+    )
+
+
+@app.post("/api/export/jsonld")
+def export_facts_jsonld(request: ExportRequest):
+    document = facts_to_jsonld(request.facts, title=request.title or "Результат запроса")
+    return JSONResponse(
+        content=sanitize(document),
+        media_type="application/ld+json",
+        headers={"Content-Disposition": 'attachment; filename="query-result.jsonld"'},
+    )
 
 
 @app.get("/api/relations")

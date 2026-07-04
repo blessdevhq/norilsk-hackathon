@@ -3,6 +3,8 @@ import json
 import re
 from pathlib import Path
 
+from units import convert_range, is_known_unit, same_dimension
+
 try:
     import networkx as nx
     from networkx.readwrite import json_graph
@@ -375,12 +377,28 @@ def condition_matches(condition, parameter=None, value_min=None, value_max=None,
         if clean_text(parameter) not in parameter_text:
             return False
 
-    if unit is not None and not unit_matches(condition.get("unit"), unit):
-        return False
+    cond_unit = condition.get("unit")
 
     if value_min is not None or value_max is not None:
         value_range = parse_number_range(condition.get("value"))
+        if value_range is None:
+            return False
+        if unit is not None:
+            converted = convert_range(value_range, cond_unit, unit)
+            if converted is not None:
+                value_range = converted
+            elif is_known_unit(cond_unit) and is_known_unit(unit):
+                return False
+            elif not unit_matches(cond_unit, unit):
+                return False
         if not ranges_intersect(value_range, value_min, value_max):
+            return False
+        return True
+
+    if unit is not None:
+        if is_known_unit(cond_unit) and is_known_unit(unit):
+            return same_dimension(cond_unit, unit)
+        if not unit_matches(cond_unit, unit):
             return False
 
     return True
@@ -439,8 +457,13 @@ def find_facts(
         if not conditions_match(fact.get("conditions"), parameter, value_min, value_max, unit):
             continue
 
-        if result_unit is not None and not unit_matches(fact.get("result_unit"), result_unit):
-            continue
+        if result_unit is not None:
+            fact_unit = fact.get("result_unit")
+            if is_known_unit(fact_unit) and is_known_unit(result_unit):
+                if not same_dimension(fact_unit, result_unit):
+                    continue
+            elif not unit_matches(fact_unit, result_unit):
+                continue
         if confidence is not None and clean_text(fact.get("confidence")) != clean_text(confidence):
             continue
         if not year_matches(fact.get("year"), year_min, year_max):
@@ -454,6 +477,12 @@ def find_facts(
 
         if result_value_min is not None or result_value_max is not None:
             result_range = parse_number_range(fact.get("result_value"))
+            if result_range is None:
+                continue
+            if result_unit is not None:
+                converted_result = convert_range(result_range, fact.get("result_unit"), result_unit)
+                if converted_result is not None:
+                    result_range = converted_result
             if not ranges_intersect(result_range, result_value_min, result_value_max):
                 continue
 
